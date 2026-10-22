@@ -88,6 +88,30 @@ function decimalsOf(values) {
   return Math.min(d, 2);
 }
 
+/* ----------------------------------------------------------- data sources */
+
+// 三種資料來源：FinMind 免費（預設）、FinMind API 金鑰、臺灣證券交易所 OpenAPI
+const SOURCES = {
+  finmind: { label: 'FinMind 免費', name: 'FinMind', url: 'https://finmindtrade.com/' },
+  'finmind-token': { label: 'FinMind（API 金鑰）', name: 'FinMind', url: 'https://finmindtrade.com/' },
+  twse: { label: '臺灣證券交易所 OpenAPI', name: '臺灣證券交易所', url: 'https://openapi.twse.com.tw/' },
+};
+
+function getSource() {
+  const saved = store.get('fm_source', null);
+  if (SOURCES[saved]) return saved;
+  return store.get('fm_token', '') ? 'finmind-token' : 'finmind'; // 舊版只存 token：視為選了金鑰
+}
+const isTwse = () => getSource() === 'twse';
+const finmindToken = () => (getSource() === 'finmind-token' ? store.get('fm_token', '') : '');
+
+function renderSourceInfo() {
+  const s = SOURCES[getSource()];
+  const link = $('#source-link');
+  link.textContent = s.name;
+  link.href = s.url;
+}
+
 /* ------------------------------------------------------------ FinMind API */
 
 const cache = new Map();
@@ -105,7 +129,7 @@ function fm(dataset, params = {}) {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.t < CACHE_TTL) return hit.p;
 
-  const token = store.get('fm_token', '');
+  const token = finmindToken();
   if (token) query.set('token', token);
 
   logRequest();
@@ -154,7 +178,12 @@ function scheduleQuota() {
 }
 
 async function refreshQuota() {
-  const token = store.get('fm_token', '');
+  if (isTwse()) {
+    quota.source = 'twse';
+    renderQuota();
+    return;
+  }
+  const token = finmindToken();
   if (!token) {
     Object.assign(quota, { source: 'local', used: requestLog().length, limit: ANON_LIMIT, error: '' });
     renderQuota();
@@ -174,6 +203,12 @@ async function refreshQuota() {
 
 function renderQuota() {
   const el = $('#quota');
+  if (quota.source === 'twse') {
+    el.className = 'quota';
+    el.innerHTML = '<span>資料來源</span><b>證交所</b>';
+    el.title = '目前使用臺灣證券交易所 OpenAPI：免金鑰，沒有公布每小時次數上限。\n歷史 K 線向證交所網站查詢，每 5 秒最多 3 次，已自動排隊。點這裡可切換資料來源。';
+    return;
+  }
   if (quota.source === 'error') {
     el.className = 'quota warn';
     el.innerHTML = '<span>API 次數</span><b>查詢失敗</b>';
@@ -194,6 +229,345 @@ function renderQuota() {
     : `FinMind 帳號用量：已使用 ${fmt(used)} 次，每小時上限 ${fmt(limit)} 次。`;
 }
 
+/* --------------------------------------------------------- TWSE (證交所) */
+
+// 證交所 OpenAPI 只有「最新一天／本月／最新一期」的快照（沒有查詢參數），而且不允許瀏覽器跨網域讀取。
+// - 用 start.bat 開的本機版：透過 server.js 的 /twse-openapi 代理讀 OpenAPI。
+// - 線上版（GitHub Pages）沒有代理：行情類改向允許跨網域的證交所網站讀；月營收、財報、重大訊息只有 OpenAPI 有。
+// 歷史 K 線一律向證交所網站逐月查詢，過去的月份存在瀏覽器裡。
+const TWSE_PROXY = 'twse-openapi';
+const TWSE_WEB = 'https://www.twse.com.tw/rwd/zh';
+const TWSE_MONTHS = 3; // K 線：本月＋前兩個月
+const TWSE_TTL = 10 * 60 * 1000;
+
+// 民國日期轉西元：'1151021' 或 '115/10/21' → '2026-10-21'
+function rocDate(s) {
+  const m = String(s ?? '').trim().match(/^(\d{2,3})\/?(\d{2})\/?(\d{2})$/);
+  return m ? `${Number(m[1]) + 1911}-${m[2]}-${m[3]}` : null;
+}
+
+// '1,234.50'、'+35.00'、'X0.00'（不比價）→ 數字；空白或 '--' → null
+function num(s) {
+  const t = String(s ?? '').replace(/[,\s+X]/g, '');
+  if (!t || t === '-' || t === '--') return null;
+  const v = Number(t);
+  return Number.isFinite(v) ? v : null;
+}
+
+// 證交所資料的欄位名稱偶爾帶空白（例如「主旨 」）
+const field = (row, name) => row[name] ?? Object.entries(row).find(([k]) => k.trim() === name)?.[1];
+
+class NoProxyError extends Error {}
+
+let proxyCheck = null;
+const hasProxy = () => (proxyCheck ??= fetch(`${TWSE_PROXY}/ping`)
+  .then(res => (res.ok ? res.text() : ''))
+  .then(text => text === 'ok')
+  .catch(() => false));
+
+async function twseOpen(path) {
+  if (!(await hasProxy())) {
+    throw new NoProxyError('證交所 OpenAPI 不允許網頁直接讀取，這項資料要用本機版（start.bat）開啟才看得到。');
+  }
+  const res = await fetch(`${TWSE_PROXY}/v1${path}`).catch(() => {
+    throw new Error('無法連線到證交所 OpenAPI，請檢查網路連線。');
+  });
+  if (!res.ok) throw new Error(`證交所 OpenAPI 回應錯誤（HTTP ${res.status}）`);
+  return res.json();
+}
+
+// 一份 OpenAPI 快照（10 分鐘快取）；沒有代理時改用 fromWeb 從證交所網站取得同樣欄位的資料
+function twseSnapshot(path, fromWeb) {
+  const key = `twse-snap:${path}`;
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.t < TWSE_TTL) return hit.p;
+  const p = twseOpen(path).catch(err => {
+    if (fromWeb && err instanceof NoProxyError) return fromWeb();
+    throw err;
+  });
+  p.catch(() => cache.delete(key));
+  cache.set(key, { t: Date.now(), p });
+  return p;
+}
+
+// 證交所網站限制同一 IP 每 5 秒最多 3 次請求，超過會被暫時封鎖，所以排隊送出
+const twseWebTimes = [];
+async function twseThrottle() {
+  for (;;) {
+    const now = Date.now();
+    while (twseWebTimes.length && now - twseWebTimes[0] > 5500) twseWebTimes.shift();
+    if (twseWebTimes.length < 3) {
+      twseWebTimes.push(now);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 5500 - (now - twseWebTimes[0]) + 50));
+  }
+}
+
+function recentMonths(n) {
+  const d = new Date();
+  d.setDate(1);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.unshift(`${d.getFullYear()}${pad(d.getMonth() + 1)}`);
+    d.setMonth(d.getMonth() - 1);
+  }
+  return out;
+}
+
+// 向證交所網站查詢（排隊、5 分鐘快取）；as = 'json' 或 'text'（CSV）
+function twseWeb(path, params = {}, as = 'json') {
+  const qs = new URLSearchParams({ ...params, response: 'json' }).toString();
+  const key = `twse-web:${path}?${qs}`;
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.t < CACHE_TTL) return hit.p;
+  const blocked = '證交所網站沒有回應，可能請求太頻繁被暫時封鎖，請過幾分鐘再試。';
+  const p = (async () => {
+    await twseThrottle();
+    const res = await fetch(`${TWSE_WEB}${path}?${qs}`).catch(() => { throw new Error(blocked); });
+    if (!res.ok) throw new Error(`證交所網站回應錯誤（HTTP ${res.status}）`);
+    if (as === 'text') return res.text();
+    const json = await res.json().catch(() => null);
+    if (!json) throw new Error(blocked);
+    return json;
+  })();
+  p.catch(() => cache.delete(key));
+  cache.set(key, { t: Date.now(), p });
+  return p;
+}
+
+// 查一個月的資料（month = 'YYYYMM'）；過去的月份不會再變，存進瀏覽器之後就不用再問證交所
+async function twseMonth(path, params, month) {
+  const past = month < recentMonths(1)[0];
+  const storeKey = `twse-month:${path}?${new URLSearchParams({ ...params, month })}`;
+  if (past) {
+    const saved = store.get(storeKey, null);
+    if (saved) return saved;
+  }
+  const json = await twseWeb(path, { ...params, date: `${month}01` });
+  const rows = json.stat === 'OK' ? json.data || [] : []; // 「很抱歉，沒有符合條件的資料」
+  if (past && rows.length) store.set(storeKey, rows);
+  return rows;
+}
+
+// 證交所網站的 CSV：第一列是欄位名稱，其餘每格都有引號
+const parseCsv = text => text.split(/\r?\n/).filter(line => line.startsWith('"'))
+  .map(line => [...line.matchAll(/"([^"]*)"/g)].map(m => m[1]));
+
+// 各資料集：一律回傳 OpenAPI 的欄位格式（沒有代理時從證交所網站轉成同樣格式）
+const TWSE = {
+  stockDayAll: () => twseSnapshot('/exchangeReport/STOCK_DAY_ALL', async () => parseCsv(await twseWeb('/afterTrading/STOCK_DAY_ALL', {}, 'text'))
+    .map(c => ({
+      Date: c[0], Code: c[1], Name: c[2], TradeVolume: c[3], TradeValue: c[4],
+      OpeningPrice: c[5], HighestPrice: c[6], LowestPrice: c[7], ClosingPrice: c[8], Change: c[9], Transaction: c[10],
+    }))),
+  per: () => twseSnapshot('/exchangeReport/BWIBBU_ALL', async () => ((await twseWeb('/afterTrading/BWIBBU_d', { selectType: 'ALL' })).data || [])
+    .map(r => ({ Code: r[0], Name: r[1], DividendYield: r[3], PEratio: r[5], PBratio: r[6] }))),
+  margin: () => twseSnapshot('/exchangeReport/MI_MARGN', async () => ((await twseWeb('/marginTrading/MI_MARGN', { selectType: 'ALL' })).tables?.[1]?.data || [])
+    .map(r => ({
+      股票代號: r[0], 股票名稱: r[1], 融資前日餘額: r[5], 融資今日餘額: r[6], 融資限額: r[7],
+      融券前日餘額: r[11], 融券今日餘額: r[12], 融券限額: r[13],
+    }))),
+  indexMonth: () => twseSnapshot('/indicesReport/MI_5MINS_HIST', async () => (await twseMonth('/TAIEX/MI_5MINS_HIST', {}, recentMonths(1)[0]))
+    .map(r => ({ Date: r[0], OpeningIndex: r[1], HighestIndex: r[2], LowestIndex: r[3], ClosingIndex: r[4] }))),
+  marketMonth: () => twseSnapshot('/exchangeReport/FMTQIK', async () => (await twseMonth('/afterTrading/FMTQIK', {}, recentMonths(1)[0]))
+    .map(r => ({ Date: r[0], TradeVolume: r[1], TradeValue: r[2], Transaction: r[3], TAIEX: r[4], Change: r[5] }))),
+  // 下面這些只有 OpenAPI 有（資料來自公開資訊觀測站）
+  revenue: () => twseSnapshot('/opendata/t187ap05_L'),
+  income: () => twseSnapshot('/opendata/t187ap06_L_ci'),
+  eps: () => twseSnapshot('/opendata/t187ap14_L'),
+  material: () => twseSnapshot('/opendata/t187ap04_L'),
+};
+
+// 下面這些都轉成和 FinMind TaiwanStockPrice 一樣的欄位，K 線、報價、明細就能共用
+async function twseIndexRows() {
+  const months = recentMonths(TWSE_MONTHS).slice(0, -1);
+  const [ohlcNow, volNow, ...past] = await Promise.all([
+    TWSE.indexMonth(),
+    TWSE.marketMonth(),
+    ...months.flatMap(m => [twseMonth('/TAIEX/MI_5MINS_HIST', {}, m), twseMonth('/afterTrading/FMTQIK', {}, m)]),
+  ]);
+  const ohlc = new Map();
+  const vol = new Map();
+  months.forEach((_, i) => {
+    for (const r of past[i * 2]) ohlc.set(rocDate(r[0]), { open: num(r[1]), max: num(r[2]), min: num(r[3]), close: num(r[4]) });
+    for (const r of past[i * 2 + 1]) {
+      vol.set(rocDate(r[0]), { Trading_Volume: num(r[1]), Trading_money: num(r[2]), Trading_turnover: num(r[3]), spread: num(r[5]) });
+    }
+  });
+  for (const r of ohlcNow) {
+    ohlc.set(rocDate(r.Date), { open: num(r.OpeningIndex), max: num(r.HighestIndex), min: num(r.LowestIndex), close: num(r.ClosingIndex) });
+  }
+  for (const r of volNow) {
+    vol.set(rocDate(r.Date), { Trading_Volume: num(r.TradeVolume), Trading_money: num(r.TradeValue), Trading_turnover: num(r.Transaction), spread: num(r.Change) });
+  }
+  let prevClose = null;
+  return [...ohlc.keys()].filter(Boolean).sort().map(date => {
+    const o = ohlc.get(date);
+    const v = vol.get(date) || {};
+    const row = {
+      date, ...o,
+      spread: v.spread ?? (prevClose == null ? 0 : o.close - prevClose),
+      Trading_Volume: v.Trading_Volume ?? 0,
+      Trading_money: v.Trading_money ?? 0,
+      Trading_turnover: v.Trading_turnover ?? 0,
+    };
+    prevClose = o.close;
+    return row;
+  });
+}
+
+async function twseStockRows(id) {
+  const lists = await Promise.all(recentMonths(TWSE_MONTHS).map(m => twseMonth('/afterTrading/STOCK_DAY', { stockNo: id }, m)));
+  return lists.flat()
+    .map(r => ({
+      date: rocDate(r[0]),
+      Trading_Volume: num(r[1]),
+      Trading_money: num(r[2]),
+      open: num(r[3]),
+      max: num(r[4]),
+      min: num(r[5]),
+      close: num(r[6]),
+      spread: num(r[7]) ?? 0,
+      Trading_turnover: num(r[8]),
+    }))
+    .filter(r => r.date)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+const twseFind = async (dataset, key, id) => (await dataset()).find(r => String(field(r, key) ?? '').trim() === id) || null;
+
+async function twsePer(id) {
+  const r = await twseFind(TWSE.per, 'Code', id);
+  return r ? { PER: num(r.PEratio), PBR: num(r.PBratio), dividend_yield: num(r.DividendYield) } : null;
+}
+
+// 融資融券（最新一天）轉成 FinMind TaiwanStockMarginPurchaseShortSale 的欄位
+async function twseMargin(id) {
+  const [r, all] = await Promise.all([twseFind(TWSE.margin, '股票代號', id), TWSE.stockDayAll()]);
+  if (!r) return [];
+  return [{
+    date: rocDate(all[0]?.Date) || '',
+    MarginPurchaseTodayBalance: num(r['融資今日餘額']) ?? 0,
+    MarginPurchaseYesterdayBalance: num(r['融資前日餘額']) ?? 0,
+    MarginPurchaseLimit: num(r['融資限額']) ?? 0,
+    ShortSaleTodayBalance: num(r['融券今日餘額']) ?? 0,
+    ShortSaleYesterdayBalance: num(r['融券前日餘額']) ?? 0,
+  }];
+}
+
+const twseNA = text => `<div class="loading">${text}<br><span class="small">要看這項資料，請到右上角設定切換為 FinMind。</span></div>`;
+
+function twseMarketMarginHtml(rows) {
+  if (!rows.length) return emptyHtml('沒有融資融券資料');
+  const sum = k => rows.reduce((s, r) => s + (num(r[k]) ?? 0), 0);
+  const margin = sum('融資今日餘額');
+  const short = sum('融券今日餘額');
+  const mChg = margin - sum('融資前日餘額');
+  const sChg = short - sum('融券前日餘額');
+  return summary([
+    ['融資餘額', `${fmt(margin)} 張`],
+    ['增減', `${signed(mChg)} 張`, cls(mChg)],
+    ['融券餘額', `${fmt(short)} 張`],
+    ['增減', `${signed(sChg)} 張`, cls(sChg)],
+    ['券資比', `${fmt((short / margin) * 100, 2)}%`],
+  ]) + '<div class="note">證交所 OpenAPI 只提供最新一天；這裡把全部上市股票的融資、融券張數加總。融資金額與歷史變化請切換 FinMind。</div>';
+}
+
+// 統計卡：單一數字用大字呈現（不用一根柱子的圖）
+const tiles = items => `<div class="tiles">${items.map(([label, value, sub = '', c = '']) => `
+  <div class="tile"><span>${label}</span><b class="${c}">${value}</b>${sub ? `<em>${sub}</em>` : ''}</div>`).join('')}</div>`;
+
+function twseRevenueHtml(row) {
+  if (!row) return emptyHtml('證交所沒有這家公司的月營收（ETF 沒有月營收）');
+  const v = k => (num(row[k]) ?? 0) * 1000; // 千元 → 元
+  const cur = v('營業收入-當月營收');
+  const prev = v('營業收入-上月營收');
+  const lastYear = v('營業收入-去年當月營收');
+  const ytd = v('累計營業收入-當月累計營收');
+  const mom = num(row['營業收入-上月比較增減(%)']);
+  const yoy = num(row['營業收入-去年同月增減(%)']);
+  const ytdYoy = num(row['累計營業收入-前期比較增減(%)']);
+  const ym = String(row['資料年月']);
+  const y = Number(ym.slice(0, -2)) + 1911;
+  const m = Number(ym.slice(-2));
+  const [unit, unitName] = moneyUnit([cur, prev, lastYear]);
+  const money = x => `${fmt(x / unit, 2)} ${unitName}`;
+  const values = [lastYear, prev, cur];
+  const names = ['去年同月', '上月', `${y}/${pad(m)}`];
+  const memo = String(row['備註'] ?? '').trim();
+
+  const block = chartBlock({
+    hint: `當月與上月、去年同月比較 · 單位：${unitName}元`,
+    spec: {
+      categories: names,
+      series: [{ name: '營收', color: VIZ.accent, colors: [VIZ.context, VIZ.context, VIZ.accent], values: values.map(x => x / unit) }],
+      caps: values.map(x => fmt(x / unit, x / unit >= 100 ? 0 : 1)),
+      tooltip: i => ({
+        title: names[i],
+        rows: [
+          { color: i === 2 ? VIZ.accent : VIZ.context, value: money(values[i]), label: '營收' },
+          ...(i === 2 ? [] : [{ foot: true, value: pctText(i === 0 ? yoy : mom, 1), label: `${y}/${pad(m)} 比${names[i]}`, cls: cls(i === 0 ? yoy : mom) }]),
+        ],
+      }),
+    },
+    tableHtml: table(['項目', `營收(${unitName})`], values.map((x, i) => `<tr><td>${names[i]}</td><td>${fmt(x / unit, 2)}</td></tr>`)),
+  });
+
+  return {
+    html: summary([
+      [`${y}/${pad(m)} 營收`, money(cur)],
+      ['月增', pctText(mom), cls(mom)],
+      ['年增', pctText(yoy), cls(yoy)],
+      [`${y} 累計`, money(ytd)],
+      ['累計年增', pctText(ytdYoy), cls(ytdYoy)],
+    ]) + block.html
+      + (memo && memo !== '-' ? `<div class="note">公司說明：${esc(memo)}</div>` : '')
+      + '<div class="note">證交所 OpenAPI 只提供最新一個月；要看近 12 個月趨勢請切換 FinMind。</div>',
+    mount: block.mount,
+  };
+}
+
+const twsePeriod = row => `${Number(row['年度']) + 1911} Q1–Q${row['季別']} 累計`;
+
+function twseGrossHtml(row) {
+  if (!row) return emptyHtml('證交所只有一般產業的毛利資料（金融保險業沒有毛利；ETF 沒有財報）');
+  const rev = (num(row['營業收入']) ?? 0) * 1000;
+  const gp = (num(field(row, '營業毛利（毛損）淨額')) ?? 0) * 1000;
+  const [unit, unitName] = moneyUnit([rev]);
+  const margin = rev ? (gp / rev) * 100 : null;
+  const width = margin == null ? 0 : Math.max(0, Math.min(100, margin));
+  return tiles([
+    ['營收', `${fmt(rev / unit, 2)}<small>${unitName}</small>`, twsePeriod(row)],
+    ['毛利', `${fmt(gp / unit, 2)}<small>${unitName}</small>`, twsePeriod(row), gp < 0 ? 'down' : ''],
+    ['毛利率', `${fmt(margin, 2)}%`, '毛利 ÷ 營收'],
+  ]) + `<div class="meter" role="img" aria-label="毛利率 ${fmt(margin, 2)}%"><i style="width:${width}%"></i></div>
+    <div class="meter-legend"><span><i class="sw" style="background:${VIZ.accent}"></i>毛利 ${fmt(margin, 1)}%</span><span>營業成本 ${fmt(100 - (margin ?? 0), 1)}%</span></div>
+    <div class="note">證交所 OpenAPI 只提供最新一期（今年初累計到最近一季）；要看最近四季的變化請切換 FinMind。</div>`;
+}
+
+function twseEpsHtml(row) {
+  if (!row) return emptyHtml('證交所沒有這家公司的 EPS（ETF 沒有財報）');
+  const eps = num(row['基本每股盈餘(元)']);
+  const rev = (num(row['營業收入']) ?? 0) * 1000;
+  const net = (num(row['稅後淨利']) ?? 0) * 1000;
+  const [unit, unitName] = moneyUnit([rev, net]);
+  return tiles([
+    ['EPS', `${fmt(eps, 2)}<small>元</small>`, twsePeriod(row), eps < 0 ? 'down' : ''],
+    ['營業收入', `${fmt(rev / unit, 2)}<small>${unitName}</small>`, twsePeriod(row)],
+    ['稅後淨利', `${fmt(net / unit, 2)}<small>${unitName}</small>`, twsePeriod(row), net < 0 ? 'down' : ''],
+  ]) + '<div class="note">證交所 OpenAPI 只提供最新一期的累計 EPS，沒有歷年資料；要看近五年 EPS 圖請切換 FinMind。</div>';
+}
+
+function twseMaterialHtml(rows) {
+  if (!rows.length) return emptyHtml('最新一日沒有這家公司的重大訊息');
+  const time = t => String(t).padStart(6, '0').replace(/(\d{2})(\d{2})(\d{2})/, '$1:$2');
+  return `<ul class="news">${rows.map(r => `
+    <li><details><summary>${esc(String(field(r, '主旨') ?? '').replace(/\s+/g, ' ').trim())}</summary>
+      <div class="detail">${esc(String(field(r, '說明') ?? '').trim())}</div></details>
+    <div class="meta">${shortDate(rocDate(field(r, '發言日期')) || '')} ${time(field(r, '發言時間'))} · 公開資訊觀測站重大訊息</div></li>`).join('')}</ul>`;
+}
+
 /* ------------------------------------------------------------- stock list */
 
 let stockList = [];
@@ -202,7 +576,13 @@ const stockMap = new Map();
 async function loadStockList() {
   const today = ymd(new Date());
   let saved = store.get('fm_stock_list', null);
-  if (!saved || saved.date !== today || !saved.items?.length) {
+  if (isTwse()) {
+    // 證交所模式不呼叫 FinMind：沿用之前存的清單（有產業別），沒有就用證交所的上市股票清單
+    if (!saved?.items?.length) {
+      const rows = await TWSE.stockDayAll();
+      saved = { date: '', items: rows.map(r => ({ id: r.Code, name: r.Name, ind: '', type: 'twse' })) };
+    }
+  } else if (!saved || saved.date !== today || !saved.items?.length) {
     const rows = await fm('TaiwanStockInfo');
     const byId = new Map();
     for (const r of rows) {
@@ -705,7 +1085,7 @@ function drawBarChart(el) {
       series.forEach((s, j) => {
         const v = s.values[i];
         if (v == null) return;
-        parts.push(`<path d="${barPath(x0 + j * (barW + 2), y(0), y(v), barW, true)}" fill="${s.color}" />`);
+        parts.push(`<path d="${barPath(x0 + j * (barW + 2), y(0), y(v), barW, true)}" fill="${s.colors?.[i] || s.color}" />`);
       });
     }
     const cap = caps[i];
@@ -828,7 +1208,7 @@ async function loadPanel(seq, key, load, render) {
     const data = await load();
     if (seq === viewSeq) fillPanel(key, render(data));
   } catch (err) {
-    if (seq === viewSeq) fillPanel(key, errHtml(err));
+    if (seq === viewSeq) fillPanel(key, err instanceof NoProxyError ? emptyHtml(esc(err.message)) : errHtml(err));
   }
 }
 
@@ -1241,6 +1621,8 @@ function quoteHtml({ title, id, tags = [], starred = null, bars, extra = [], not
   const prev = b.close - b.change;
   const pct = prev ? (b.change / prev) * 100 : 0;
   const year = bars.slice(-250);
+  // 證交所模式只有約 3 個月的 K 線，不能叫 52 週
+  const span = bars.length >= 240 ? '52週' : `近${Math.max(1, Math.round(bars.length / 21))}月`;
   const p = v => fmt(v, ch.prec);
   const stats = [
     ['開盤', p(b.open), cls(b.open - prev)],
@@ -1249,8 +1631,8 @@ function quoteHtml({ title, id, tags = [], starred = null, bars, extra = [], not
     ['昨收', p(prev)],
     ...extra,
     ['振幅', `${fmt(((b.high - b.low) / prev) * 100, 2)}%`],
-    ['52週高', p(Math.max(...year.map(x => x.high)))],
-    ['52週低', p(Math.min(...year.map(x => x.low)))],
+    [`${span}高`, p(Math.max(...year.map(x => x.high)))],
+    [`${span}低`, p(Math.min(...year.map(x => x.low)))],
   ];
   return `
     <div>
@@ -1290,22 +1672,39 @@ async function showIndex(id) {
   markNav();
   const meta = INDEXES[id];
   const tags = [`${meta.market}指數`];
+  const twse = isTwse();
   document.title = `${meta.name} · FinMind 看盤`;
   $('#quote').innerHTML = quoteHtml({ title: meta.name, id, tags });
   vizResize.disconnect();
   $('#panels').innerHTML = [
     panelHtml('inst', '三大法人買賣超', '上市整體市場 · 億元'),
-    panelHtml('margin', '融資融券', '上市整體市場'),
+    panelHtml('margin', '融資融券', twse ? '上市整體市場 · 最新一天' : '上市整體市場'),
     panelHtml('daily', '近期行情', meta.name),
   ].join('');
   showChartMsg('載入中…');
 
-  loadPanel(seq, 'inst', () => fm('TaiwanStockTotalInstitutionalInvestors', { start_date: daysAgo(45) }),
-    rows => institutionalHtml(groupInstitutional(rows, 1e8), 2, false));
-  loadPanel(seq, 'margin', () => fm('TaiwanStockTotalMarginPurchaseShortSale', { start_date: daysAgo(30) }), marketMarginHtml);
+  if (twse && id !== 'TAIEX') {
+    const msg = '證交所資料沒有櫃買指數（櫃買指數由櫃買中心發布）。請到右上角設定切換為 FinMind。';
+    clearChart();
+    showChartMsg(msg);
+    $('#quote').innerHTML = quoteHtml({ title: meta.name, id, tags, note: msg });
+    for (const key of ['inst', 'margin', 'daily']) fillPanel(key, emptyHtml('證交所資料沒有櫃買中心的資料'));
+    return;
+  }
+
+  if (twse) {
+    fillPanel('inst', twseNA('證交所 OpenAPI 沒有三大法人買賣超資料。'));
+    loadPanel(seq, 'margin', TWSE.margin, twseMarketMarginHtml);
+  } else {
+    loadPanel(seq, 'inst', () => fm('TaiwanStockTotalInstitutionalInvestors', { start_date: daysAgo(45) }),
+      rows => institutionalHtml(groupInstitutional(rows, 1e8), 2, false));
+    loadPanel(seq, 'margin', () => fm('TaiwanStockTotalMarginPurchaseShortSale', { start_date: daysAgo(30) }), marketMarginHtml);
+  }
 
   try {
-    const rows = await fm('TaiwanStockPrice', { data_id: id, start_date: daysAgo(PRICE_HISTORY_DAYS) });
+    const rows = twse
+      ? await twseIndexRows()
+      : await fm('TaiwanStockPrice', { data_id: id, start_date: daysAgo(PRICE_HISTORY_DAYS) });
     if (seq !== viewSeq) return;
     if (!rows.length) throw new Error('查無指數資料');
     const bars = setChartData(rows, 'index');
@@ -1345,7 +1744,7 @@ async function showStock(id) {
     extra.push(
       ['本益比', q.per?.PER ? fmt(q.per.PER, 2) : '—'],
       ['淨值比', q.per?.PBR ? fmt(q.per.PBR, 2) : '—'],
-      ['殖利率', q.per ? `${fmt(q.per.dividend_yield, 2)}%` : '—'],
+      ['殖利率', q.per?.dividend_yield != null ? `${fmt(q.per.dividend_yield, 2)}%` : '—'],
       ['外資持股', q.share ? `${fmt(q.share.ForeignInvestmentSharesRatio, 2)}%` : '—'],
     );
     $('#quote').innerHTML = quoteHtml({
@@ -1359,17 +1758,20 @@ async function showStock(id) {
 
   draw();
   listReady.then(draw);
+  const twse = isTwse();
   vizResize.disconnect();
   $('#panels').innerHTML = [
     panelHtml('inst', '三大法人買賣超', '張'),
-    panelHtml('margin', '融資融券', '張'),
-    panelHtml('revenue', '月營收', '近 12 個月'),
-    panelHtml('gross', '營收與毛利', '近四季 · 過去 12 個月'),
-    panelHtml('eps', 'EPS 每股盈餘', '近五年'),
+    panelHtml('margin', '融資融券', twse ? '張 · 最新一天' : '張'),
+    panelHtml('revenue', '月營收', twse ? '最新一個月' : '近 12 個月'),
+    panelHtml('gross', '營收與毛利', twse ? '最新一期' : '近四季 · 過去 12 個月'),
+    panelHtml('eps', 'EPS 每股盈餘', twse ? '最新一期' : '近五年'),
     panelHtml('daily', '日成交明細', '近 15 個交易日'),
-    panelHtml('news', '相關新聞', '近兩日'),
+    twse ? panelHtml('news', '重大訊息', '證交所 · 最新一日') : panelHtml('news', '相關新聞', '近兩日'),
   ].join('');
   showChartMsg('載入中…');
+
+  if (twse) return loadStockTwse(seq, id, q, draw);
 
   const recent = daysAgo(14);
   fm('TaiwanStockPER', { data_id: id, start_date: recent })
@@ -1400,6 +1802,59 @@ async function showStock(id) {
     if (!rows.some(r => r.close > 0)) {
       throw new Error(`查無「${id}」的交易資料，請確認股票代號是否正確。`);
     }
+    q.bars = setChartData(rows, 'stock');
+    draw();
+    fillPanel('daily', dailyHtml(q.bars, 'stock'));
+  } catch (err) {
+    if (seq !== viewSeq) return;
+    clearChart();
+    showChartMsg(esc(err.message));
+    q.note = esc(err.message);
+    draw();
+    fillPanel('daily', errHtml(err));
+  }
+}
+
+// 證交所模式的個股頁：先確認是上市股票，避免對上櫃股票白白向證交所網站查歷史
+async function loadStockTwse(seq, id, q, draw) {
+  const fail = msg => {
+    clearChart();
+    showChartMsg(esc(msg));
+    q.note = esc(msg);
+    draw();
+    for (const key of ['inst', 'margin', 'revenue', 'gross', 'eps', 'daily', 'news']) fillPanel(key, emptyHtml('證交所沒有這檔股票的資料（說明見上方）'));
+  };
+  let listed;
+  try {
+    listed = await twseFind(TWSE.stockDayAll, 'Code', id);
+  } catch (err) {
+    if (seq === viewSeq) fail(err.message);
+    return;
+  }
+  if (seq !== viewSeq) return;
+  if (!listed) {
+    await listReady;
+    if (seq !== viewSeq) return;
+    const info = stockMap.get(id);
+    fail(info && info.type !== 'twse'
+      ? `${info.name}（${id}）是${MARKET_LABEL[info.type] || '非上市'}股票，證交所只有上市股票的資料。請到右上角設定切換為 FinMind。`
+      : `證交所的上市股票中查無「${id}」，請確認代號；上櫃、興櫃股票請切換為 FinMind。`);
+    return;
+  }
+
+  twsePer(id).then(per => { q.per = per; draw(); }).catch(() => {});
+  fillPanel('inst', twseNA('證交所 OpenAPI 沒有個股的三大法人買賣超資料。'));
+  loadPanel(seq, 'margin', () => twseMargin(id), stockMarginHtml);
+  loadPanel(seq, 'revenue', () => twseFind(TWSE.revenue, '公司代號', id), twseRevenueHtml);
+  loadPanel(seq, 'gross', () => twseFind(TWSE.income, '公司代號', id), twseGrossHtml);
+  loadPanel(seq, 'eps', () => twseFind(TWSE.eps, '公司代號', id), twseEpsHtml);
+  loadPanel(seq, 'news', async () => (await TWSE.material())
+    .filter(r => String(field(r, '公司代號')).trim() === id), twseMaterialHtml);
+
+  try {
+    const rows = await twseStockRows(id);
+    if (seq !== viewSeq) return;
+    if (!rows.some(r => r.close > 0)) throw new Error(`證交所近 ${TWSE_MONTHS} 個月沒有「${id}」的成交資料。`);
     q.bars = setChartData(rows, 'stock');
     draw();
     fillPanel('daily', dailyHtml(q.bars, 'stock'));
@@ -1463,17 +1918,31 @@ async function renderWatchlist() {
     </li>`).join('');
   markNav();
 
+  // 證交所模式：一次 STOCK_DAY_ALL 就有全部上市股票的最新報價（上櫃股票會顯示「—」）
+  const latestQuote = async id => {
+    if (isTwse()) {
+      const r = await twseFind(TWSE.stockDayAll, 'Code', id);
+      const close = num(r?.ClosingPrice);
+      return close ? { close, spread: num(r.Change) ?? 0, dp: decimalsOf([close]) } : null;
+    }
+    const rows = (await fm('TaiwanStockPrice', { data_id: id, start_date: daysAgo(20) })).filter(r => r.close > 0);
+    const last = rows[rows.length - 1];
+    return last ? { close: last.close, spread: last.spread, dp: decimalsOf(rows.slice(-20).map(r => r.close)) } : null;
+  };
+
   await Promise.all(watch.map(async id => {
     const li = $(`#watchlist li[data-id="${CSS.escape(id)}"]`);
     try {
-      const rows = (await fm('TaiwanStockPrice', { data_id: id, start_date: daysAgo(20) })).filter(r => r.close > 0);
-      const last = rows[rows.length - 1];
-      if (!li || !last) return;
+      const last = await latestQuote(id);
+      if (!li) return;
+      if (!last) {
+        li.querySelector('.w-price').textContent = '—';
+        return;
+      }
       const prev = last.close - last.spread;
       const pct = prev ? (last.spread / prev) * 100 : 0;
-      const dp = decimalsOf(rows.slice(-20).map(r => r.close));
       li.querySelector('.w-price').className = `w-price ${cls(last.spread)}`;
-      li.querySelector('.w-price').textContent = fmt(last.close, dp);
+      li.querySelector('.w-price').textContent = fmt(last.close, last.dp);
       li.querySelector('.badge').className = `badge ${cls(last.spread)}`;
       li.querySelector('.badge').textContent = pctText(pct);
     } catch {
@@ -1636,25 +2105,58 @@ async function refreshAll() {
 $('#btn-refresh').addEventListener('click', refreshAll);
 
 const settings = $('#settings');
+const sourceRadios = () => $$('input[name="source"]', settings);
+const pickedSource = () => sourceRadios().find(r => r.checked)?.value || 'finmind';
+
+function syncSettingsForm() {
+  const picked = pickedSource();
+  for (const el of $$('.source', settings)) el.classList.toggle('on', el.querySelector('input[name="source"]').value === picked);
+  $('#settings-err').hidden = true;
+}
+
 function openSettings() {
+  const source = getSource();
+  for (const r of sourceRadios()) r.checked = r.value === source;
   $('#token').value = store.get('fm_token', '');
+  syncSettingsForm();
   settings.returnValue = '';
   settings.showModal();
 }
+
 $('#btn-settings').addEventListener('click', openSettings);
 $('#quota').addEventListener('click', openSettings);
-settings.addEventListener('close', () => {
-  const action = settings.returnValue;
-  if (action === 'save') {
-    const token = $('#token').value.trim();
-    if (token) store.set('fm_token', token); else store.del('fm_token');
-    toast(token ? '已儲存 API token' : '已清除 API token');
-  } else if (action === 'clear') {
-    store.del('fm_token');
-    toast('已清除 API token');
-  } else {
+settings.addEventListener('change', syncSettingsForm);
+$('#token').addEventListener('focus', () => {
+  sourceRadios().find(r => r.value === 'finmind-token').checked = true;
+  syncSettingsForm();
+});
+$('#token').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#settings-save').click(); }
+});
+$('#token-clear').addEventListener('click', () => {
+  $('#token').value = '';
+  $('#token').focus();
+});
+// 按「儲存」就直接套用再關閉（不等 close 事件）；取消或按 Esc 則什麼都不改
+$('#settings-save').addEventListener('click', e => {
+  e.preventDefault();
+  const source = pickedSource();
+  const token = $('#token').value.trim();
+  if (source === 'finmind-token' && !token) {
+    $('#settings-err').textContent = '請先貼上 FinMind API 金鑰，或改選其他資料來源。';
+    $('#settings-err').hidden = false;
+    $('#token').focus();
     return;
   }
+  settings.close('save');
+  const before = getSource();
+  if (token) store.set('fm_token', token); else store.del('fm_token');
+  store.set('fm_source', source);
+  renderSourceInfo();
+  toast(`資料來源：${SOURCES[source].label}`);
+  cache.clear();
+  if (before !== source) listReady = loadStockList().catch(err => toast(`股票清單載入失敗：${err.message}`));
+  refreshQuota();
   refreshAll();
 });
 
@@ -1666,6 +2168,7 @@ function boot() {
     return;
   }
   initCharts();
+  renderSourceInfo();
   markSeg('#ranges', 'range', ch.range);
   markSeg('#indicators', 'ind', ch.ind);
 
@@ -1679,8 +2182,8 @@ function boot() {
 
   refreshQuota();
   // 本機估算不需連網，常更新讓過期的請求退出統計；查帳號用量則放慢頻率
-  setInterval(() => { if (!store.get('fm_token', '')) refreshQuota(); }, 30 * 1000);
-  setInterval(() => { if (store.get('fm_token', '')) refreshQuota(); }, 5 * 60 * 1000);
+  setInterval(() => { if (getSource() === 'finmind' || !finmindToken()) refreshQuota(); }, 30 * 1000);
+  setInterval(() => { if (finmindToken()) refreshQuota(); }, 5 * 60 * 1000);
 }
 
 boot();

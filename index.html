@@ -24,7 +24,7 @@
       <ul id="suggest" class="suggest" role="listbox" hidden></ul>
     </div>
     <div class="actions">
-      <button id="quota" class="quota" title="FinMind API 剩餘請求次數">
+      <button id="quota" class="quota" title="API 剩餘請求次數">
         <span>API 次數</span><b>…</b>
       </button>
       <button id="btn-refresh" class="icon-btn" title="重新整理資料">
@@ -79,21 +79,48 @@
   </main>
 
   <footer class="foot">
-    資料來源：<a href="https://finmindtrade.com/" target="_blank" rel="noopener">FinMind</a>
+    資料來源：<a id="source-link" href="https://finmindtrade.com/" target="_blank" rel="noopener">FinMind</a>
     · 圖表：<a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView Lightweight Charts™</a>
     · 免費版為盤後日資料，非即時報價 · 僅供參考，不構成投資建議
   </footer>
 
   <dialog id="settings" class="dialog">
     <form method="dialog">
-      <h2>FinMind API 設定</h2>
-      <p class="muted">不設定 token 也能使用，但每小時只有 300 次請求，上方的剩餘次數也只能用這台瀏覽器的紀錄估算。到 FinMind 免費註冊後，可在會員頁取得 API token 並貼在這裡：上限會提高，上方也會改顯示 FinMind 帳號實際的剩餘次數。Token 只存在這台電腦的瀏覽器裡。</p>
-      <label for="token">API Token</label>
-      <input id="token" type="password" autocomplete="off" placeholder="貼上你的 FinMind token">
+      <h2>資料來源</h2>
+      <div class="sources" role="radiogroup" aria-label="資料來源">
+        <label class="source">
+          <input type="radio" name="source" value="finmind">
+          <div>
+            <b>FinMind 免費<span class="tag">預設</span></b>
+            <span>不用註冊，每小時 300 次請求。資料最完整：三年 K 線、三大法人、近 12 個月營收、近五年 EPS、新聞。</span>
+          </div>
+        </label>
+        <div class="source source-token">
+          <label>
+            <input type="radio" name="source" value="finmind-token">
+            <div>
+              <b>FinMind（API 金鑰）</b>
+              <span>資料和免費版相同，每小時 600 次以上，上方會顯示帳號實際剩餘次數。到 FinMind 免費註冊後可在會員頁取得金鑰。</span>
+            </div>
+          </label>
+          <div class="token-row">
+            <input id="token" type="password" autocomplete="off" placeholder="貼上你的 FinMind API 金鑰" aria-label="FinMind API 金鑰">
+            <button type="button" id="token-clear" class="btn ghost">清除</button>
+          </div>
+        </div>
+        <label class="source">
+          <input type="radio" name="source" value="twse">
+          <div>
+            <b>臺灣證券交易所 OpenAPI</b>
+            <span>官方資料、免金鑰。只有上市股票：K 線近 3 個月，月營收與財報只有最新一期，沒有三大法人、櫃買指數與上櫃股票。月營收、財報、重大訊息需用本機版（start.bat）開啟。</span>
+          </div>
+        </label>
+      </div>
+      <p class="muted small">金鑰只存在這台電腦的瀏覽器裡。</p>
+      <p id="settings-err" class="settings-err" hidden></p>
       <div class="dialog-actions">
-        <button value="clear" class="btn ghost">清除</button>
         <button value="cancel" class="btn ghost">取消</button>
-        <button value="save" class="btn primary">儲存</button>
+        <button value="save" id="settings-save" class="btn primary">儲存</button>
       </div>
     </form>
   </dialog>

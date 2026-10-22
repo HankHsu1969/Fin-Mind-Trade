@@ -16,6 +16,35 @@ const TYPES = {
   '.ico': 'image/x-icon',
 };
 
+// 證交所 OpenAPI 不允許瀏覽器跨網域讀取，由這裡代為取得：/twse-openapi/v1/<路徑>
+const TWSE_OPENAPI = 'https://openapi.twse.com.tw';
+const proxyCache = new Map(); // 10 分鐘快取，避免重複向證交所要同一份大檔
+
+async function proxyTwse(sub, res) {
+  if (sub === '/ping') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('ok');
+  }
+  if (!/^\/v1\/[A-Za-z0-9_/]+$/.test(sub)) {
+    res.writeHead(404);
+    return res.end();
+  }
+  const send = (status, body) => {
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' });
+    res.end(body);
+  };
+  const hit = proxyCache.get(sub);
+  if (hit && Date.now() - hit.t < 10 * 60 * 1000) return send(200, hit.body);
+  try {
+    const upstream = await fetch(TWSE_OPENAPI + sub, { signal: AbortSignal.timeout(60 * 1000) });
+    const body = Buffer.from(await upstream.arrayBuffer());
+    if (upstream.ok) proxyCache.set(sub, { t: Date.now(), body });
+    send(upstream.status, body);
+  } catch (err) {
+    send(502, JSON.stringify({ error: err.message }));
+  }
+}
+
 const server = http.createServer((req, res) => {
   let urlPath;
   try {
@@ -24,6 +53,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(400);
     return res.end();
   }
+  if (urlPath.startsWith('/twse-openapi/')) return proxyTwse(urlPath.slice('/twse-openapi'.length), res);
   const file = path.join(ROOT, urlPath === '/' ? 'index.html' : urlPath);
   if (!file.startsWith(ROOT + path.sep) || !TYPES[path.extname(file)]) {
     res.writeHead(404);
