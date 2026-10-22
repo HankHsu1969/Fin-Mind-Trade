@@ -16,44 +16,72 @@ const TYPES = {
   '.ico': 'image/x-icon',
 };
 
-// 證交所 OpenAPI 不允許瀏覽器跨網域讀取，由這裡代為取得：/twse-openapi/v1/<路徑>
-const TWSE_OPENAPI = 'https://openapi.twse.com.tw';
-const proxyCache = new Map(); // 10 分鐘快取，避免重複向證交所要同一份大檔
+const sendJson = (res, status, body, cache = 'no-store') => {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': cache });
+  res.end(body);
+};
 
-async function proxyTwse(sub, res) {
+// 證交所基本市況報導網站（即時報價）不允許瀏覽器跨網域讀取，代為取得：/twse-mis/stock/api/<檔名>?<參數>
+// /twse-mis/ping 讓網頁判斷有沒有本機代理（線上版沒有）
+const TWSE_MIS = 'https://mis.twse.com.tw';
+const MIS_PATHS = new Set(['/stock/api/getStockInfo.jsp', '/stock/api/getChartOhlcStatis.jsp']);
+
+async function proxyMis(sub, search, res) {
   if (sub === '/ping') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('ok');
   }
-  if (!/^\/v1\/[A-Za-z0-9_/]+$/.test(sub)) {
+  if (!MIS_PATHS.has(sub)) {
     res.writeHead(404);
     return res.end();
   }
-  const send = (status, body) => {
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' });
-    res.end(body);
-  };
-  const hit = proxyCache.get(sub);
-  if (hit && Date.now() - hit.t < 10 * 60 * 1000) return send(200, hit.body);
   try {
-    const upstream = await fetch(TWSE_OPENAPI + sub, { signal: AbortSignal.timeout(60 * 1000) });
-    const body = Buffer.from(await upstream.arrayBuffer());
-    if (upstream.ok) proxyCache.set(sub, { t: Date.now(), body });
-    send(upstream.status, body);
+    const upstream = await fetch(TWSE_MIS + sub + search, {
+      headers: { 'User-Agent': 'Mozilla/5.0', Referer: `${TWSE_MIS}/stock/index` },
+      signal: AbortSignal.timeout(15 * 1000),
+    });
+    sendJson(res, upstream.status, (await upstream.text()).trim()); // 回應前面有一堆空行
   } catch (err) {
-    send(502, JSON.stringify({ error: err.message }));
+    sendJson(res, 502, JSON.stringify({ error: err.message }));
+  }
+}
+
+// 證交所沒有個股的當日分時資料，改用 Yahoo 奇摩股市的 1 分 K：/yahoo-chart/2330.TW（上櫃為 .TWO）
+// Yahoo 也不允許跨網域，而且要帶瀏覽器的 User-Agent；同一檔 30 秒內共用一次結果
+const yahooCache = new Map();
+
+async function proxyYahoo(symbol, res) {
+  if (!/^[0-9A-Z]{4,6}\.(TW|TWO)$/.test(symbol)) {
+    res.writeHead(404);
+    return res.end();
+  }
+  const hit = yahooCache.get(symbol);
+  if (hit && Date.now() - hit.t < 30 * 1000) return sendJson(res, 200, hit.body);
+  try {
+    const upstream = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1m&range=1d`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', Accept: 'application/json' },
+      signal: AbortSignal.timeout(15 * 1000),
+    });
+    const body = await upstream.text();
+    if (upstream.ok) yahooCache.set(symbol, { t: Date.now(), body });
+    sendJson(res, upstream.status, body);
+  } catch (err) {
+    sendJson(res, 502, JSON.stringify({ error: err.message }));
   }
 }
 
 const server = http.createServer((req, res) => {
+  let url;
   let urlPath;
   try {
-    urlPath = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+    url = new URL(req.url, 'http://localhost');
+    urlPath = decodeURIComponent(url.pathname);
   } catch {
     res.writeHead(400);
     return res.end();
   }
-  if (urlPath.startsWith('/twse-openapi/')) return proxyTwse(urlPath.slice('/twse-openapi'.length), res);
+  if (urlPath.startsWith('/twse-mis/')) return proxyMis(urlPath.slice('/twse-mis'.length), url.search, res);
+  if (urlPath.startsWith('/yahoo-chart/')) return proxyYahoo(urlPath.slice('/yahoo-chart/'.length), res);
   const file = path.join(ROOT, urlPath === '/' ? 'index.html' : urlPath);
   if (!file.startsWith(ROOT + path.sep) || !TYPES[path.extname(file)]) {
     res.writeHead(404);

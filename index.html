@@ -18,6 +18,10 @@
       <a href="#/" data-nav="TAIEX">加權指數</a>
       <a href="#/index/TPEx" data-nav="TPEx">櫃買指數</a>
     </nav>
+    <div class="seg mode" id="mode" role="group" aria-label="資料模式">
+      <button data-mode="realtime" title="盤中即時報價（證交所基本市況報導）">即時</button>
+      <button data-mode="eod" title="收盤後的日資料（依設定的資料來源）">盤後</button>
+    </div>
     <div class="search">
       <input id="q" type="search" autocomplete="off" spellcheck="false"
              placeholder="輸入股票代號或名稱，例：2330、台積電">
@@ -41,11 +45,11 @@
       <section id="quote" class="card quote"></section>
 
       <section class="card chart-card">
-        <div class="chart-toolbar">
+        <div class="chart-toolbar eod-only">
           <div class="seg" id="ranges">
             <button data-range="22">1月</button>
-            <button data-range="66">3月</button>
-            <button data-range="132" class="on">6月</button>
+            <button data-range="66" class="on">3月</button>
+            <button data-range="132">6月</button>
             <button data-range="250">1年</button>
             <button data-range="0">3年</button>
           </div>
@@ -55,13 +59,19 @@
             <button data-ind="rsi">RSI</button>
           </div>
         </div>
-        <div class="chart-wrap">
+        <div id="rt-bar" class="rt-bar rt-only"></div>
+        <div class="chart-wrap eod-only">
           <div id="legend" class="legend"></div>
           <div id="chart-main" class="chart-main"></div>
         </div>
-        <div class="chart-wrap">
+        <div class="chart-wrap eod-only">
           <div id="legend-sub" class="legend"></div>
           <div id="chart-sub" class="chart-sub"></div>
+        </div>
+        <div class="chart-wrap rt-only">
+          <div id="legend-rt" class="legend"></div>
+          <div id="chart-intraday" class="chart-intraday"></div>
+          <div id="rt-note" class="note"></div>
         </div>
         <div id="chart-msg" class="chart-msg" hidden></div>
       </section>
@@ -79,15 +89,18 @@
   </main>
 
   <footer class="foot">
-    資料來源：<a id="source-link" href="https://finmindtrade.com/" target="_blank" rel="noopener">FinMind</a>
+    盤後資料：<a href="https://finmindtrade.com/" target="_blank" rel="noopener">FinMind</a>
+    · 即時報價：<a href="https://mis.twse.com.tw/" target="_blank" rel="noopener">證交所基本市況報導</a>
+    · 個股當日走勢：<a href="https://tw.stock.yahoo.com/" target="_blank" rel="noopener">Yahoo 奇摩股市</a>（即時需本機版）
     · 圖表：<a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView Lightweight Charts™</a>
-    · 免費版為盤後日資料，非即時報價 · 僅供參考，不構成投資建議
+    · 僅供參考，不構成投資建議
   </footer>
 
   <dialog id="settings" class="dialog">
     <form method="dialog">
-      <h2>資料來源</h2>
-      <div class="sources" role="radiogroup" aria-label="資料來源">
+      <h2>盤後資料來源</h2>
+      <p class="muted small">「盤後」模式的日 K、法人、營收、財報都來自 FinMind；「即時」模式的報價與五檔來自證交所，個股當日走勢來自 Yahoo 奇摩股市（需本機版）。</p>
+      <div class="sources" role="radiogroup" aria-label="盤後資料來源">
         <label class="source">
           <input type="radio" name="source" value="finmind">
           <div>
@@ -108,13 +121,6 @@
             <button type="button" id="token-clear" class="btn ghost">清除</button>
           </div>
         </div>
-        <label class="source">
-          <input type="radio" name="source" value="twse">
-          <div>
-            <b>臺灣證券交易所 OpenAPI</b>
-            <span>官方資料、免金鑰。只有上市股票：K 線近 3 個月，月營收與財報只有最新一期，沒有三大法人、櫃買指數與上櫃股票。月營收、財報、重大訊息需用本機版（start.bat）開啟。</span>
-          </div>
-        </label>
       </div>
       <p class="muted small">金鑰只存在這台電腦的瀏覽器裡。</p>
       <p id="settings-err" class="settings-err" hidden></p>

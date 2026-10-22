@@ -131,7 +131,7 @@ button { font: inherit; color: inherit; }
 .tag { font-size: 12px; padding: 1px 8px; border-radius: 99px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
 .star { background: none; border: 1px solid var(--line); border-radius: 99px; padding: 1px 10px; font-size: 12px; cursor: pointer; color: var(--muted); }
 .star.on { color: var(--accent); border-color: #5c4519; }
-.q-price { display: flex; align-items: baseline; gap: 12px; margin-top: 6px; }
+.q-price { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; margin-top: 6px; }
 .q-price .price { font-size: 36px; font-weight: 700; line-height: 1.1; }
 .q-price .chg { font-size: 17px; font-weight: 600; }
 .q-date { margin-top: 4px; font-size: 12px; color: var(--muted); }
@@ -231,19 +231,38 @@ tbody tr:hover td { background: #161e2a; }
 .viz-tip .key { width: 10px; height: 2px; border-radius: 1px; flex: none; }
 .viz-tip .sep { border-top: 1px solid var(--line); margin: 5px 0 3px; }
 
-/* ---------- stat tiles & meter (TWSE 單期資料) ---------- */
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin: 2px 0 10px; }
-.tile { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 0; }
-.tile span { display: block; font-size: 12px; color: var(--muted); }
-.tile b { display: block; font-size: 20px; font-weight: 600; margin: 2px 0; font-variant-numeric: normal; white-space: nowrap; }
-.tile b small { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 3px; }
-.tile em { display: block; font-style: normal; font-size: 11px; color: var(--muted); }
-.meter { height: 10px; border-radius: 5px; background: #104281; overflow: hidden; }
-.meter i { display: block; height: 100%; background: #3987e5; border-radius: 5px 0 0 5px; }
-.meter-legend { display: flex; justify-content: space-between; margin-top: 6px; font-size: 12px; color: var(--text-2); }
-.meter-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
-.news details summary { cursor: pointer; list-style-position: outside; }
-.news details .detail { white-space: pre-wrap; font-size: 12px; color: var(--text-2); margin-top: 6px; max-height: 220px; overflow-y: auto; }
+/* ---------- realtime / end-of-day mode ---------- */
+.mode button { padding: 4px 14px; }
+.mode button[data-mode="realtime"].on { background: #3a1f24; color: #ffd5d5; }
+.chart-card:not(.rt) .rt-only, .chart-card.rt .eod-only { display: none; }
+.chart-intraday { height: 400px; }
+.rt-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+.rt-bar b { color: var(--text); font-weight: 600; }
+.live-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 1px 9px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.live-badge.on { color: #ffd5d5; border-color: #5a2a30; background: #2a1519; }
+.live-badge i { width: 7px; height: 7px; border-radius: 50%; background: var(--up); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .live-badge i { animation: none; } }
+table.book td, table.book th { text-align: center; }
+table.book td.bar-cell { width: 30%; }
+table.book .book-bid i { right: 0; background: rgba(240, 72, 72, .22); opacity: 1; }
+table.book .book-ask i { left: 0; right: auto; background: rgba(32, 178, 108, .22); opacity: 1; }
+table.book .book-bid em { float: right; }
+table.book .book-ask em { float: left; }
+.range { margin: 6px 0 4px; }
+.range-track { position: relative; height: 14px; margin: 18px 6px 6px; border-radius: 7px; background: #1e2734; }
+.range-track .band { position: absolute; top: 0; bottom: 0; background: #3987e5; opacity: .55; border-radius: 7px; }
+.range-track .tick { position: absolute; top: -5px; bottom: -5px; width: 2px; margin-left: -1px; background: #8592a3; }
+.range-track .tick.open { background: #f5a524; }
+.range-track .now { position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--text); box-shadow: 0 0 0 2px var(--panel); }
+.range-track .now.up { background: var(--up); }
+.range-track .now.down { background: var(--down); }
+.range-labels { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.range-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px; font-size: 12px; color: var(--text-2); }
+.range-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.range-legend .sw.band { background: #3987e5; opacity: .55; }
+.range-legend .sw.open { width: 3px; background: #f5a524; }
+.range-legend .sw.now { border-radius: 50%; background: var(--text); }
 
 /* ---------- settings: data sources ---------- */
 .sources { display: grid; gap: 8px; margin: 10px 0 12px; }
@@ -295,13 +314,16 @@ tbody tr:hover td { background: #161e2a; }
 /* ---------- responsive ---------- */
 @media (max-width: 1100px) {
   .layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "primary" "watch" "panels"; }
+  .topbar { flex-wrap: wrap; row-gap: 10px; }
+  .search { order: 5; flex-basis: 100%; max-width: none; }
+  .actions { margin-left: auto; }
 }
 @media (max-width: 760px) {
   .topbar { position: static; flex-wrap: wrap; gap: 10px; padding: 10px 16px; }
   .search { order: 5; flex-basis: 100%; max-width: none; }
   .actions { margin-left: auto; }
   .layout { padding: 12px 16px; gap: 12px; }
-  .quote { grid-template-columns: 1fr; }
+  .quote { grid-template-columns: minmax(0, 1fr); }
   .panels { grid-template-columns: minmax(0, 1fr); }
   .chart-main { height: 340px; }
   .q-price .price { font-size: 30px; }
