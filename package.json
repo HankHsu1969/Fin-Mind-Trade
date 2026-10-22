@@ -1,0 +1,9 @@
+{
+  "name": "finmind-stock-watch",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FinMind 看盤：大盤與個股 K 線、技術指標、三大法人、融資融券、月營收與新聞",
+  "scripts": {
+    "start": "node server.js --open"
+  }
+}

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FinMind 看盤</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23121821'/%3E%3Cpath d='M6 22l6-7 5 4 9-11' stroke='%23f04848' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 23l7-8 5 4 10-12" /></svg>
+      <span>FinMind 看盤</span>
+    </a>
+    <nav class="nav">
+      <a href="#/" data-nav="TAIEX">加權指數</a>
+      <a href="#/index/TPEx" data-nav="TPEx">櫃買指數</a>
+    </nav>
+    <div class="search">
+      <input id="q" type="search" autocomplete="off" spellcheck="false"
+             placeholder="輸入股票代號或名稱，例：2330、台積電">
+      <ul id="suggest" class="suggest" role="listbox" hidden></ul>
+    </div>
+    <div class="actions">
+      <button id="quota" class="quota" title="FinMind API 剩餘請求次數">
+        <span>API 次數</span><b>…</b>
+      </button>
+      <button id="btn-refresh" class="icon-btn" title="重新整理資料">
+        <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" /></svg>
+      </button>
+      <button id="btn-settings" class="icon-btn" title="API 設定">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <div class="primary">
+      <section id="quote" class="card quote"></section>
+
+      <section class="card chart-card">
+        <div class="chart-toolbar">
+          <div class="seg" id="ranges">
+            <button data-range="22">1月</button>
+            <button data-range="66">3月</button>
+            <button data-range="132" class="on">6月</button>
+            <button data-range="250">1年</button>
+            <button data-range="0">3年</button>
+          </div>
+          <div class="seg" id="indicators">
+            <button data-ind="kd" class="on">KD</button>
+            <button data-ind="macd">MACD</button>
+            <button data-ind="rsi">RSI</button>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <div id="legend" class="legend"></div>
+          <div id="chart-main" class="chart-main"></div>
+        </div>
+        <div class="chart-wrap">
+          <div id="legend-sub" class="legend"></div>
+          <div id="chart-sub" class="chart-sub"></div>
+        </div>
+        <div id="chart-msg" class="chart-msg" hidden></div>
+      </section>
+    </div>
+
+    <aside class="card watch">
+      <div class="card-head">
+        <h2>自選股</h2>
+        <span class="muted small">點擊查看個股</span>
+      </div>
+      <ul id="watchlist" class="watchlist"></ul>
+    </aside>
+
+    <section id="panels" class="panels"></section>
+  </main>
+
+  <footer class="foot">
+    資料來源：<a href="https://finmindtrade.com/" target="_blank" rel="noopener">FinMind</a>
+    · 圖表：<a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView Lightweight Charts™</a>
+    · 免費版為盤後日資料，非即時報價 · 僅供參考，不構成投資建議
+  </footer>
+
+  <dialog id="settings" class="dialog">
+    <form method="dialog">
+      <h2>FinMind API 設定</h2>
+      <p class="muted">不設定 token 也能使用，但每小時只有 300 次請求，上方的剩餘次數也只能用這台瀏覽器的紀錄估算。到 FinMind 免費註冊後，可在會員頁取得 API token 並貼在這裡：上限會提高，上方也會改顯示 FinMind 帳號實際的剩餘次數。Token 只存在這台電腦的瀏覽器裡。</p>
+      <label for="token">API Token</label>
+      <input id="token" type="password" autocomplete="off" placeholder="貼上你的 FinMind token">
+      <div class="dialog-actions">
+        <button value="clear" class="btn ghost">清除</button>
+        <button value="cancel" class="btn ghost">取消</button>
+        <button value="save" class="btn primary">儲存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
