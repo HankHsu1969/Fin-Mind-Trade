@@ -2,7 +2,11 @@
 
 用 [FinMind API](https://finmindtrade.com/analysis/#/data/api) 做的網頁看盤軟體。預設顯示大盤（加權指數），在搜尋框輸入股票代號或名稱，就會切到該個股的詳細交易資訊。
 
-## 啟動
+## 線上使用
+
+直接開啟：https://hankhsu1969.github.io/Fin-Mind-Trade/
+
+## 在自己電腦上啟動
 
 需要 [Node.js](https://nodejs.org/)（不用安裝任何套件）。
 

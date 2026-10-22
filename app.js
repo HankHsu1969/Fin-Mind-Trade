@@ -709,8 +709,12 @@ function drawBarChart(el) {
       });
     }
     const cap = caps[i];
-    if (cap && textWidth(cap) <= (allCaps ? band - 4 : band * 2)) {
-      parts.push(`<text class="cap" x="${cx(i)}" y="${y(Math.max(0, tops[i])) - 6}" text-anchor="middle">${esc(cap)}</text>`);
+    const capW = cap ? textWidth(cap) : 0;
+    if (cap && capW <= (allCaps ? band - 4 : band * 2)) {
+      // 分組柱可指定標籤屬於哪一根（capSeries），標籤水平對齊那根柱
+      const capX = !stacked && spec.capSeries != null ? x0 + spec.capSeries * (barW + 2) + barW / 2 : cx(i);
+      const x = Math.min(capX, width - m.right - capW / 2);
+      parts.push(`<text class="cap" x="${x}" y="${y(Math.max(0, tops[i])) - 6}" text-anchor="middle">${esc(cap)}</text>`);
     }
   });
 
@@ -1150,6 +1154,7 @@ function revenueHtml(rows) {
         { name: '營收', color: VIZ.accent, values: ms.map(r => r.v / unit) },
       ],
       caps: ms.map((r, i) => (i === ms.length - 1 ? fmt(r.v / unit, r.v / unit >= 100 ? 0 : 1) : null)),
+      capSeries: 1,
       tooltip: i => {
         const r = ms[i];
         const yoy = growth(r.v, lastYear(r));
